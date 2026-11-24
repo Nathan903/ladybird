@@ -56,10 +56,13 @@ ConnectionFromUI::ConnectionFromUI(NonnullOwnPtr<IPC::Transport> transport)
 ConnectionFromUI::~ConnectionFromUI()
 {
     WebView::ApplicationWebUI::set_callbacks({});
-    Application::settings().on_persist = nullptr;
-    auto& browser_process = Application::the().browser_process();
-    browser_process.on_new_tab = nullptr;
-    browser_process.on_new_window = nullptr;
+    // Deferred IPC work can keep this connection alive through application teardown.
+    if (Application::is_initialized()) {
+        Application::settings().on_persist = nullptr;
+        auto& browser_process = Application::the().browser_process();
+        browser_process.on_new_tab = nullptr;
+        browser_process.on_new_window = nullptr;
+    }
     s_the = nullptr;
 }
 

@@ -1,5 +1,10 @@
 include_guard()
 
+if (WIN32 AND VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+    find_program(PKG_CONFIG_EXECUTABLE NAMES pkgconf
+        PATHS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/pkgconf"
+        NO_DEFAULT_PATH)
+endif()
 find_package(PkgConfig REQUIRED)
 
 if (NOT WIN32 AND NOT ANDROID)

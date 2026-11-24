@@ -725,6 +725,9 @@ ErrorOr<NonnullOwnPtr<Application>> Application::create(Main::Arguments const& a
     TRY(application->connect_to_hub(arguments));
 #else
     application->m_hub = TRY(Hub::Application::create(arguments, static_cast<Hub::ApplicationHost*>(application.ptr())));
+    if (application->m_hub->should_exit_after_profile_coordination())
+        return application;
+
     s_browser_has_started = true;
 
     // Headless mode has no UI to connect to the Hub.

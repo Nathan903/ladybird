@@ -124,7 +124,14 @@ ErrorOr<Profile> Profile::create(ProfileSelection const& selection, ProfileRoots
     if (selection.temporary) {
         TRY(Core::Directory::create(roots.temporary, Core::Directory::CreateDirectories::Yes, 0700));
 
-        auto root = LexicalPath::join(roots.temporary, ByteString::formatted("ladybird-profile-{:016x}-{:016x}", get_random<u64>(), get_random<u64>())).string();
+#if defined(AK_OS_WINDOWS)
+        // Windows AF_UNIX sockets have a short path limit. Leave room for the socket within this profile.
+        constexpr auto temporary_profile_prefix = "lb-"sv;
+#else
+        constexpr auto temporary_profile_prefix = "ladybird-profile-"sv;
+#endif
+        auto directory_name = ByteString::formatted("{}{:016x}-{:016x}", temporary_profile_prefix, get_random<u64>(), get_random<u64>());
+        auto root = LexicalPath::join(roots.temporary, directory_name).string();
         TRY(Core::Directory::create(root, Core::Directory::CreateDirectories::Yes, 0700));
         root = TRY(FileSystem::real_path(root));
 
