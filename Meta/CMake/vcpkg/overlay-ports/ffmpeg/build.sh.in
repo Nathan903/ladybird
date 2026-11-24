@@ -113,6 +113,12 @@ build_ffmpeg() {
     OPTION_VARIABLE="OPTIONS_${BUILD_ARCH}"
     echo "OPTION_VARIABLE=${OPTION_VARIABLE}"
 
+    # A Cygwin symlink may only be visible to Cygwin programs. The native
+    # compiler needs a Windows junction to read the out-of-tree sources.
+    if [[ "$OSTYPE" == cygwin && ! -e src ]]; then
+        cmd.exe /d /c mklink /J src "$(cygpath -w "$PATH_TO_SRC_DIR")"
+    fi
+
     echo "=== CONFIGURING ==="
 
     sh "$PATH_TO_SRC_DIR/configure" "--prefix=$PATH_TO_PACKAGE_DIR" @CONFIGURE_OPTIONS@ --arch=${BUILD_ARCH} ${!OPTION_VARIABLE} $@

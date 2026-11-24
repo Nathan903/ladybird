@@ -1,4 +1,4 @@
-set_property(GLOBAL PROPERTY JOB_POOLS "${JOB_POOLS};cargo=1")
+set_property(GLOBAL APPEND PROPERTY JOB_POOLS cargo=1)
 
 # Detect the Rust toolchain.
 find_program(RUST_CARGO cargo REQUIRED)

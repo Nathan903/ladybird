@@ -19,6 +19,7 @@ vcpkg_extract_source_archive(SOURCE_PATH
         subdirs.patch
         vcpkg-cross-data.patch
         remove-unused-data.patch # Ladybird: leave the charset converters and StringPrep profiles out of the data.
+        cygwin-native-pkgdata-paths.patch
 )
 
 vcpkg_find_acquire_program(PYTHON3)

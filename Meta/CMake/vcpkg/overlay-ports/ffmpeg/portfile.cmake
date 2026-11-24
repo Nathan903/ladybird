@@ -826,7 +826,7 @@ if (NOT VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "release")
     set(CONFIGURE_OPTIONS "${OPTIONS} ${OPTIONS_RELEASE}")
     set(INST_PREFIX       "${CURRENT_PACKAGES_DIR}")
 
-    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY)
+    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY NEWLINE_STYLE UNIX)
 
     z_vcpkg_setup_pkgconfig_path(CONFIG RELEASE)
 
@@ -867,7 +867,7 @@ if (NOT VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "debug")
     set(CONFIGURE_OPTIONS "${OPTIONS} ${OPTIONS_DEBUG}")
     set(INST_PREFIX       "${CURRENT_PACKAGES_DIR}/debug")
 
-    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY)
+    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY NEWLINE_STYLE UNIX)
 
     z_vcpkg_setup_pkgconfig_path(CONFIG DEBUG)
 
