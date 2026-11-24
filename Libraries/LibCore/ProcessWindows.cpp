@@ -18,6 +18,7 @@
 #include <AK/Windows.h>
 #include <LibCore/Process.h>
 #include <LibCore/System.h>
+#include <stdlib.h>
 
 namespace Core {
 
@@ -196,6 +197,11 @@ ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> argume
 
 void Process::terminate_immediately(int status)
 {
+#if defined(LADYBIRD_PGO_TRAINING)
+    // Let the LLVM profile runtime flush each DLL's counters on a clean training exit.
+    if (status == 0)
+        exit(status);
+#endif
     // TerminateProcess() is stronger than the CRT's _exit(), since it skips
     // DLL detach notifications and the other ExitProcess() teardown paths.
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(status));

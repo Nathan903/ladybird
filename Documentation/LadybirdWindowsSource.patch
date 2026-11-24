@@ -1,0 +1,286 @@
+diff --git a/Libraries/LibCore/ProcessWindows.cpp b/Libraries/LibCore/ProcessWindows.cpp
+index 78a87845208..e60d0aeff96 100644
+--- a/Libraries/LibCore/ProcessWindows.cpp
++++ b/Libraries/LibCore/ProcessWindows.cpp
+@@ -18,6 +18,7 @@
+ #include <AK/Windows.h>
+ #include <LibCore/Process.h>
+ #include <LibCore/System.h>
++#include <stdlib.h>
+ 
+ namespace Core {
+ 
+@@ -196,6 +197,11 @@ ErrorOr<Process> Process::spawn(StringView path, ReadonlySpan<StringView> argume
+ 
+ void Process::terminate_immediately(int status)
+ {
++#if defined(LADYBIRD_PGO_TRAINING)
++    // Let the LLVM profile runtime flush each DLL's counters on a clean training exit.
++    if (status == 0)
++        exit(status);
++#endif
+     // TerminateProcess() is stronger than the CRT's _exit(), since it skips
+     // DLL detach notifications and the other ExitProcess() teardown paths.
+     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(status));
+diff --git a/Libraries/LibWebView/Profile.cpp b/Libraries/LibWebView/Profile.cpp
+index 918ec037d25..f20449b9110 100644
+--- a/Libraries/LibWebView/Profile.cpp
++++ b/Libraries/LibWebView/Profile.cpp
+@@ -124,7 +124,14 @@ ErrorOr<Profile> Profile::create(ProfileSelection const& selection, ProfileRoots
+     if (selection.temporary) {
+         TRY(Core::Directory::create(roots.temporary, Core::Directory::CreateDirectories::Yes, 0700));
+ 
+-        auto root = LexicalPath::join(roots.temporary, ByteString::formatted("ladybird-profile-{:016x}-{:016x}", get_random<u64>(), get_random<u64>())).string();
++#if defined(AK_OS_WINDOWS)
++        // Windows AF_UNIX sockets have a short path limit. Leave room for the socket within this profile.
++        constexpr auto temporary_profile_prefix = "lb-"sv;
++#else
++        constexpr auto temporary_profile_prefix = "ladybird-profile-"sv;
++#endif
++        auto directory_name = ByteString::formatted("{}{:016x}-{:016x}", temporary_profile_prefix, get_random<u64>(), get_random<u64>());
++        auto root = LexicalPath::join(roots.temporary, directory_name).string();
+         TRY(Core::Directory::create(root, Core::Directory::CreateDirectories::Yes, 0700));
+         root = TRY(FileSystem::real_path(root));
+ 
+diff --git a/Meta/CMake/check_for_dependencies.cmake b/Meta/CMake/check_for_dependencies.cmake
+index db142b9b5c2..65adc7edcb1 100644
+--- a/Meta/CMake/check_for_dependencies.cmake
++++ b/Meta/CMake/check_for_dependencies.cmake
+@@ -1,5 +1,10 @@
+ include_guard()
+ 
++if (WIN32 AND VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
++    find_program(PKG_CONFIG_EXECUTABLE NAMES pkgconf
++        PATHS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/pkgconf"
++        NO_DEFAULT_PATH)
++endif()
+ find_package(PkgConfig REQUIRED)
+ 
+ if (NOT WIN32 AND NOT ANDROID)
+diff --git a/Meta/CMake/compile_options.cmake b/Meta/CMake/compile_options.cmake
+index 6f7e1549cce..50c8373d41a 100644
+--- a/Meta/CMake/compile_options.cmake
++++ b/Meta/CMake/compile_options.cmake
+@@ -316,11 +316,32 @@ elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
+     endif()
+ endif()
+ 
++function(ladybird_disable_ipo_for_auto_exported_dlls directory)
++    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
++    foreach(target IN LISTS targets)
++        get_target_property(type "${target}" TYPE)
++        get_target_property(auto_exports "${target}" WINDOWS_EXPORT_ALL_SYMBOLS)
++        if (type STREQUAL "SHARED_LIBRARY" AND auto_exports)
++            set_property(TARGET "${target}" PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
++        endif()
++    endforeach()
++
++    get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
++    foreach(child IN LISTS children)
++        ladybird_disable_ipo_for_auto_exported_dlls("${child}")
++    endforeach()
++endfunction()
++
+ if (LADYBIRD_ENABLE_LTO)
+     include(CheckIPOSupported)
+     check_ipo_supported(RESULT IPO_AVAILABLE OUTPUT output)
+     if(IPO_AVAILABLE)
+         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
++        if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
++            # CMake's automatic DLL export list can omit symbols from Clang's LTO objects.
++            # Check the final export properties after all targets have been defined.
++            cmake_language(DEFER CALL ladybird_disable_ipo_for_auto_exported_dlls "${CMAKE_CURRENT_SOURCE_DIR}")
++        endif()
+     else()
+         message(WARNING "Not enabling IPO as it is not supported: ${output}")
+     endif()
+diff --git a/Meta/CMake/rust_crate.cmake b/Meta/CMake/rust_crate.cmake
+index 3b3e6214f97..84d56fc4fd7 100644
+--- a/Meta/CMake/rust_crate.cmake
++++ b/Meta/CMake/rust_crate.cmake
+@@ -1,4 +1,4 @@
+-set_property(GLOBAL PROPERTY JOB_POOLS "${JOB_POOLS};cargo=1")
++set_property(GLOBAL APPEND PROPERTY JOB_POOLS cargo=1)
+ 
+ # Detect the Rust toolchain.
+ find_program(RUST_CARGO cargo REQUIRED)
+diff --git a/Meta/CMake/vcpkg/overlay-ports/ffmpeg/build.sh.in b/Meta/CMake/vcpkg/overlay-ports/ffmpeg/build.sh.in
+index fa04e106909..00c334abe81 100644
+--- a/Meta/CMake/vcpkg/overlay-ports/ffmpeg/build.sh.in
++++ b/Meta/CMake/vcpkg/overlay-ports/ffmpeg/build.sh.in
+@@ -113,6 +113,12 @@ build_ffmpeg() {
+     OPTION_VARIABLE="OPTIONS_${BUILD_ARCH}"
+     echo "OPTION_VARIABLE=${OPTION_VARIABLE}"
+ 
++    # A Cygwin symlink may only be visible to Cygwin programs. The native
++    # compiler needs a Windows junction to read the out-of-tree sources.
++    if [[ "$OSTYPE" == cygwin && ! -e src ]]; then
++        cmd.exe /d /c mklink /J src "$(cygpath -w "$PATH_TO_SRC_DIR")"
++    fi
++
+     echo "=== CONFIGURING ==="
+ 
+     sh "$PATH_TO_SRC_DIR/configure" "--prefix=$PATH_TO_PACKAGE_DIR" @CONFIGURE_OPTIONS@ --arch=${BUILD_ARCH} ${!OPTION_VARIABLE} $@
+diff --git a/Meta/CMake/vcpkg/overlay-ports/ffmpeg/portfile.cmake b/Meta/CMake/vcpkg/overlay-ports/ffmpeg/portfile.cmake
+index 10b960c9897..a393d3abb3d 100644
+--- a/Meta/CMake/vcpkg/overlay-ports/ffmpeg/portfile.cmake
++++ b/Meta/CMake/vcpkg/overlay-ports/ffmpeg/portfile.cmake
+@@ -826,7 +826,7 @@ if (NOT VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "release")
+     set(CONFIGURE_OPTIONS "${OPTIONS} ${OPTIONS_RELEASE}")
+     set(INST_PREFIX       "${CURRENT_PACKAGES_DIR}")
+ 
+-    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY)
++    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY NEWLINE_STYLE UNIX)
+ 
+     z_vcpkg_setup_pkgconfig_path(CONFIG RELEASE)
+ 
+@@ -867,7 +867,7 @@ if (NOT VCPKG_BUILD_TYPE OR VCPKG_BUILD_TYPE STREQUAL "debug")
+     set(CONFIGURE_OPTIONS "${OPTIONS} ${OPTIONS_DEBUG}")
+     set(INST_PREFIX       "${CURRENT_PACKAGES_DIR}/debug")
+ 
+-    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY)
++    configure_file("${CMAKE_CURRENT_LIST_DIR}/build.sh.in" "${BUILD_DIR}/build.sh" @ONLY NEWLINE_STYLE UNIX)
+ 
+     z_vcpkg_setup_pkgconfig_path(CONFIG DEBUG)
+ 
+diff --git a/Meta/CMake/vcpkg/overlay-ports/icu/portfile.cmake b/Meta/CMake/vcpkg/overlay-ports/icu/portfile.cmake
+index 24084a72d10..d807a4ccec9 100644
+--- a/Meta/CMake/vcpkg/overlay-ports/icu/portfile.cmake
++++ b/Meta/CMake/vcpkg/overlay-ports/icu/portfile.cmake
+@@ -19,6 +19,7 @@ vcpkg_extract_source_archive(SOURCE_PATH
+         subdirs.patch
+         vcpkg-cross-data.patch
+         remove-unused-data.patch # Ladybird: leave the charset converters and StringPrep profiles out of the data.
++        cygwin-native-pkgdata-paths.patch
+ )
+ 
+ vcpkg_find_acquire_program(PYTHON3)
+diff --git a/Services/Hub/ConnectionFromUI.cpp b/Services/Hub/ConnectionFromUI.cpp
+index 43435a1be25..0aafceb27d5 100644
+--- a/Services/Hub/ConnectionFromUI.cpp
++++ b/Services/Hub/ConnectionFromUI.cpp
+@@ -56,10 +56,13 @@ ConnectionFromUI::ConnectionFromUI(NonnullOwnPtr<IPC::Transport> transport)
+ ConnectionFromUI::~ConnectionFromUI()
+ {
+     WebView::ApplicationWebUI::set_callbacks({});
+-    Application::settings().on_persist = nullptr;
+-    auto& browser_process = Application::the().browser_process();
+-    browser_process.on_new_tab = nullptr;
+-    browser_process.on_new_window = nullptr;
++    // Deferred IPC work can keep this connection alive through application teardown.
++    if (Application::is_initialized()) {
++        Application::settings().on_persist = nullptr;
++        auto& browser_process = Application::the().browser_process();
++        browser_process.on_new_tab = nullptr;
++        browser_process.on_new_window = nullptr;
++    }
+     s_the = nullptr;
+ }
+ 
+diff --git a/UI/Qt/Application.cpp b/UI/Qt/Application.cpp
+index 5207cd3814d..00f900bd10b 100644
+--- a/UI/Qt/Application.cpp
++++ b/UI/Qt/Application.cpp
+@@ -725,6 +725,9 @@ ErrorOr<NonnullOwnPtr<Application>> Application::create(Main::Arguments const& a
+     TRY(application->connect_to_hub(arguments));
+ #else
+     application->m_hub = TRY(Hub::Application::create(arguments, static_cast<Hub::ApplicationHost*>(application.ptr())));
++    if (application->m_hub->should_exit_after_profile_coordination())
++        return application;
++
+     s_browser_has_started = true;
+ 
+     // Headless mode has no UI to connect to the Hub.
+diff --git a/Meta/CMake/vcpkg/overlay-ports/icu/cygwin-native-pkgdata-paths.patch b/Meta/CMake/vcpkg/overlay-ports/icu/cygwin-native-pkgdata-paths.patch
+new file mode 100644
+index 00000000000..3e4bf896771
+--- /dev/null
++++ b/Meta/CMake/vcpkg/overlay-ports/icu/cygwin-native-pkgdata-paths.patch
+@@ -0,0 +1,47 @@
++--- a/source/data/Makefile.in
+++++ b/source/data/Makefile.in
++@@ -46,10 +46,16 @@
++ ifeq ($(CURDIR),)
++ CURDIR=.
++ endif
+++# Cygwin make uses POSIX paths that native Windows pkgdata cannot read.
+++pkgdata_path = $(1)
+++ifneq (,$(findstring CYGWIN,$(shell uname -s)))
+++pkgdata_path = $(shell cygpath -m "$(1)")
+++endif
+++
++ ifeq ($(BUILD_HOST_ICU),OS390)
++-PKGDATA = $(TOOLBINDIR)/pkgdata $(PKGDATA_OPTS) -z -q -c -s $(CURDIR)/out/build/$(ICUDATA_PLATFORM_NAME) -d $(ICUPKGDATA_OUTDIR)
++-else
++-PKGDATA = $(TOOLBINDIR)/pkgdata $(PKGDATA_OPTS) -q -c -s $(CURDIR)/out/build/$(ICUDATA_PLATFORM_NAME) -d $(ICUPKGDATA_OUTDIR)
+++PKGDATA = $(TOOLBINDIR)/pkgdata $(PKGDATA_OPTS) -z -q -c -s "$(call pkgdata_path,$(CURDIR)/out/build/$(ICUDATA_PLATFORM_NAME))" -d $(ICUPKGDATA_OUTDIR)
+++else
+++PKGDATA = $(TOOLBINDIR)/pkgdata $(PKGDATA_OPTS) -q -c -s "$(call pkgdata_path,$(CURDIR)/out/build/$(ICUDATA_PLATFORM_NAME))" -d $(ICUPKGDATA_OUTDIR)
++ endif
++ 
++ # OBJDATADIR must be a short path (with ..'s) to the data.
++@@ -184,18 +190,18 @@
++ ifeq ($(PKGDATA_MODE),dll)
++ # For MinGW, do we want the DLL to go in the bin location?
++ ifeq ($(MINGW_MOVEDLLSTOBINDIR),YES)
++-	$(PKGDATA_INVOKE) $(PKGDATA) -m static -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBSTATICNAME) $(PKGDATA_LIST) -I $(DESTDIR)$(bindir)
++-else
++-	$(PKGDATA_INVOKE) $(PKGDATA) -m static -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBSTATICNAME) $(PKGDATA_LIST) -I $(ICUPKGDATA_INSTALL_LIBDIR)
+++	$(PKGDATA_INVOKE) $(PKGDATA) -m static -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBSTATICNAME) $(PKGDATA_LIST) -I "$(call pkgdata_path,$(DESTDIR)$(bindir))"
+++else
+++	$(PKGDATA_INVOKE) $(PKGDATA) -m static -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBSTATICNAME) $(PKGDATA_LIST) -I "$(call pkgdata_path,$(ICUPKGDATA_INSTALL_LIBDIR))"
++ endif
++ endif
++ endif
++ ifneq ($(ICUDATA_SOURCE_IS_NATIVE_TARGET),YES)
++ # For MinGW, do we want the DLL to go in the bin location?
++ ifeq ($(MINGW_MOVEDLLSTOBINDIR),YES)
++-	$(PKGDATA_INVOKE) $(PKGDATA) -m $(PKGDATA_MODE) $(PKGDATA_VERSIONING) -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBNAME) $(PKGDATA_LIST) -I $(DESTDIR)$(bindir)
++-else
++-	$(PKGDATA_INVOKE) $(PKGDATA) -m $(PKGDATA_MODE) $(PKGDATA_VERSIONING) -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBNAME) $(PKGDATA_LIST) -I $(ICUPKGDATA_INSTALL_DIR)
+++	$(PKGDATA_INVOKE) $(PKGDATA) -m $(PKGDATA_MODE) $(PKGDATA_VERSIONING) -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBNAME) $(PKGDATA_LIST) -I "$(call pkgdata_path,$(DESTDIR)$(bindir))"
+++else
+++	$(PKGDATA_INVOKE) $(PKGDATA) -m $(PKGDATA_MODE) $(PKGDATA_VERSIONING) -e $(ICUDATA_ENTRY_POINT) -T $(OUTTMPDIR) -s $(BUILDDIR) -p $(ICUDATA_NAME) $(PKGDATA_LIBNAME) $(PKGDATA_LIST) -I "$(call pkgdata_path,$(ICUPKGDATA_INSTALL_DIR))"
++ endif
++ else
++ 	$(INSTALL_DATA) $(ICUDATA_SOURCE_ARCHIVE) $(DESTDIR)$(ICUPKGDATA_DIR)
+diff --git a/Meta/CMake/windows_pgo.cmake b/Meta/CMake/windows_pgo.cmake
+new file mode 100644
+index 00000000000..46720a86c86
+--- /dev/null
++++ b/Meta/CMake/windows_pgo.cmake
+@@ -0,0 +1,33 @@
++# Auto-exported DLLs use the same non-profiled objects in both PGO phases.
++function(ladybird_windows_filter_pgo directory)
++    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
++    foreach(target IN LISTS targets)
++        get_target_property(type "${target}" TYPE)
++        get_target_property(auto_exports "${target}" WINDOWS_EXPORT_ALL_SYMBOLS)
++        if("${target}" STREQUAL "LibCore" AND LADYBIRD_WINDOWS_PGO_PHASE STREQUAL "generate")
++            target_compile_definitions(LibCore PRIVATE LADYBIRD_PGO_TRAINING=1)
++        elseif("${target}" STREQUAL "LibCore")
++            # The training build's shutdown changes this file's CFG.
++            set_property(SOURCE "${directory}/ProcessWindows.cpp" TARGET_DIRECTORY LibCore
++                APPEND PROPERTY COMPILE_OPTIONS "/clang:-fno-profile-use")
++        endif()
++        # The separate helper programs define the same ladybird_main symbol.
++        if(LADYBIRD_WINDOWS_PGO_PHASE STREQUAL "use" AND type STREQUAL "EXECUTABLE"
++            AND directory MATCHES "/Services(/|$)" AND EXISTS "${directory}/main.cpp")
++            set_property(SOURCE "${directory}/main.cpp" TARGET_DIRECTORY "${target}"
++                APPEND PROPERTY COMPILE_OPTIONS "/clang:-fno-profile-use")
++        endif()
++        if(type STREQUAL "SHARED_LIBRARY" AND auto_exports)
++            target_compile_options("${target}" PRIVATE "/clang:-fno-profile-${LADYBIRD_WINDOWS_PGO_PHASE}")
++        endif()
++    endforeach()
++
++    get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
++    foreach(child IN LISTS children)
++        ladybird_windows_filter_pgo("${child}")
++    endforeach()
++endfunction()
++
++if(WIN32 AND LADYBIRD_WINDOWS_PGO_PHASE MATCHES "^(generate|use)$")
++    cmake_language(DEFER CALL ladybird_windows_filter_pgo "${CMAKE_CURRENT_SOURCE_DIR}")
++endif()
+\ No newline at end of file

@@ -1,0 +1,84 @@
+diff --git a/scripts/cmake/vcpkg_acquire_msys.cmake b/scripts/cmake/vcpkg_acquire_msys.cmake
+index 81b027d78..dcb6b075a 100644
+--- a/scripts/cmake/vcpkg_acquire_msys.cmake
++++ b/scripts/cmake/vcpkg_acquire_msys.cmake
+@@ -154,6 +154,41 @@ function(z_vcpkg_acquire_msys_collect_hashes out_hash)
+ endfunction()
+ 
+ function(vcpkg_acquire_msys out_msys_root)
++    # Ladybird native Windows build: resolve POSIX helpers from Cygwin.
++    # Never execute the MSYS2 download code in this vcpkg checkout.
++    cmake_path(CONVERT "$ENV{LADYBIRD_CYGWIN_ROOT}" TO_CMAKE_PATH_LIST helper_root NORMALIZE)
++    if(helper_root STREQUAL "" OR NOT EXISTS "${helper_root}/usr/bin/bash.exe")
++        message(FATAL_ERROR "Set LADYBIRD_CYGWIN_ROOT to the configured Cygwin build helper directory")
++    endif()
++    cmake_parse_arguments(PARSE_ARGV 1 helper "NO_DEFAULT_PACKAGES;Z_ALL_PACKAGES"
++        "Z_DECLARE_EXTRA_PACKAGES_COMMAND" "PACKAGES;DIRECT_PACKAGES")
++    if(helper_Z_ALL_PACKAGES OR helper_Z_DECLARE_EXTRA_PACKAGES_COMMAND OR helper_DIRECT_PACKAGES
++       OR helper_UNPARSED_ARGUMENTS)
++        message(FATAL_ERROR "Unsupported build helper request from ${PORT}: ${ARGV}")
++    endif()
++    foreach(package IN LISTS helper_PACKAGES)
++        if(package STREQUAL "autoconf-wrapper")
++            set(program autoconf)
++        elseif(package STREQUAL "automake-wrapper")
++            set(program automake)
++        elseif(package STREQUAL "binutils")
++            set(program strip)
++        elseif(package STREQUAL "autoconf-archive")
++            if(NOT EXISTS "${helper_root}/usr/share/aclocal/ax_pthread.m4")
++                message(FATAL_ERROR "Cygwin package autoconf-archive is required by ${PORT}")
++            endif()
++            continue()
++        else()
++            set(program "${package}")
++        endif()
++        if(NOT EXISTS "${helper_root}/usr/bin/${program}.exe"
++           AND NOT EXISTS "${helper_root}/usr/bin/${program}")
++            message(FATAL_ERROR "Cygwin build helper ${package} (${program}) is required by ${PORT}")
++        endif()
++    endforeach()
++    message(STATUS "Using Cygwin build helpers for ${PORT}")
++    set("${out_msys_root}" "${helper_root}" PARENT_SCOPE)
++    return()
+     cmake_parse_arguments(PARSE_ARGV 1 "arg"
+         "NO_DEFAULT_PACKAGES;Z_ALL_PACKAGES"
+         "Z_DECLARE_EXTRA_PACKAGES_COMMAND"
+diff --git a/scripts/cmake/vcpkg_find_acquire_program(PERL).cmake b/scripts/cmake/vcpkg_find_acquire_program(PERL).cmake
+index 4a8cb8197..bfc77af5e 100644
+--- a/scripts/cmake/vcpkg_find_acquire_program(PERL).cmake
++++ b/scripts/cmake/vcpkg_find_acquire_program(PERL).cmake
+@@ -3,6 +3,13 @@ set(program_version 5.42.2.1)
+ set(brew_package_name "perl")
+ set(apt_package_name "perl")
+ if(CMAKE_HOST_WIN32)
++    cmake_path(CONVERT "$ENV{LADYBIRD_NATIVE_PERL}" TO_CMAKE_PATH_LIST native_perl NORMALIZE)
++    if(native_perl STREQUAL "" OR NOT EXISTS "${native_perl}")
++        message(FATAL_ERROR "The native MSVC-built Perl is required for ${PORT} (LADYBIRD_NATIVE_PERL)")
++    endif()
++    set(PERL "${native_perl}" CACHE INTERNAL "Native MSVC Perl")
++    set(PERL "${PERL}" PARENT_SCOPE)
++    return()
+     set(download_urls
+         "https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip"
+     )
+diff --git a/scripts/vcpkg-tools.json b/scripts/vcpkg-tools.json
+index 3defbcbd5..f4e09a70e 100644
+--- a/scripts/vcpkg-tools.json
++++ b/scripts/vcpkg-tools.json
+@@ -310,11 +310,11 @@
+       "name": "powershell-core",
+       "os": "windows",
+       "arch": "x64",
+-      "version": "7.6.9",
++      "version": "7.4.22",
+       "executable": "pwsh.exe",
+-      "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.9/PowerShell-7.6.9-win-x64.zip",
+-      "sha512": "68def7ae2d7facd1a652a2752613fa6d07cd0f09d91d3d70876661a0860e4464f585e5c0a6148610cc4833425d19ec96fb3a22b7af1f9609ef3eba21c6f78d2c",
+-      "archive": "PowerShell-7.6.9-win-x64.zip"
++      "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.4.22/PowerShell-7.4.22-win-x64.zip",
++      "sha512": "809a636d5c9d54558c150dfe1092b0ce4299a0c72ae6d52b2688b244b27d94e4ed679bcab7f1be7a879c042a78f9d8bf34d4f936f005d35889878527836e6e10",
++      "archive": "PowerShell-7.4.22-win-x64.zip"
+     },
+     {
+       "name": "powershell-core",

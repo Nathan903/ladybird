@@ -1,0 +1,146 @@
+diff --git a/run.py b/run.py
+index a98f04d..6d0f195 100755
+--- a/run.py
++++ b/run.py
+@@ -1,5 +1,7 @@
+ #!/usr/bin/env python3
+ import argparse
++import ctypes
++from ctypes import wintypes
+ import json
+ import os
+ import signal
+@@ -14,10 +16,11 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
+ from pathlib import Path
+ from urllib.parse import urlencode, urlunparse
+ 
++import psutil
+ from tabulate import tabulate
+ 
+ # How long the browser gets to launch, load the page, and start running the first test.
+-STARTUP_TIMEOUT_SECONDS = 10
++STARTUP_TIMEOUT_SECONDS = 60
+ 
+ # How long the browser gets to exit after being sent SIGINT at the end of a benchmark.
+ SHUTDOWN_GRACE_PERIOD_SECONDS = 10
+@@ -58,6 +61,46 @@ def append_table_data(benchmark, results):
+             benchmark_totals[benchmark]["reported_score"] = []
+         benchmark_totals[benchmark]["reported_score"].append(results["score"])
+ 
++def close_benchmark_windows(process):
++    user32 = ctypes.WinDLL("user32", use_last_error=True)
++    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
++    user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
++    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
++    user32.IsWindowVisible.argtypes = [wintypes.HWND]
++    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
++
++    @enum_proc
++    def close_window(hwnd, _):
++        pid = wintypes.DWORD()
++        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
++        if pid.value == process.pid and user32.IsWindowVisible(hwnd):
++            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
++        return True
++
++    user32.EnumWindows(close_window, 0)
++
++
++def private_memory_bytes(root_pid):
++    try:
++        root = psutil.Process(root_pid)
++        processes = [root, *root.children(recursive=True)]
++    except psutil.Error:
++        return None
++    total = 0
++    for process in processes:
++        try:
++            total += process.memory_info().private
++        except psutil.Error:
++            continue
++    return total or None
++
++
++def save_memory_samples(path, benchmark, samples):
++    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
++    data.append({"benchmark": benchmark, "samples": samples})
++    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
++
++
+ class BenchmarkHTTPRequestHandler(SimpleHTTPRequestHandler):
+     def do_POST(self):
+         self.server.last_progress_time = time.monotonic()
+@@ -98,7 +141,10 @@ class BenchmarkHTTPRequestHandler(SimpleHTTPRequestHandler):
+             self.server.phase = "finished"
+             def run_callback():
+                 if self.server.running_ladybird_process:
+-                    self.server.running_ladybird_process.send_signal(signal.SIGINT)
++                    if os.name == "nt":
++                        close_benchmark_windows(self.server.running_ladybird_process)
++                    else:
++                        self.server.running_ladybird_process.send_signal(signal.SIGINT)
+ 
+             self.send_response(200)
+             self.end_headers()
+@@ -117,7 +163,7 @@ class BenchmarkHTTPServer(HTTPServer):
+ 
+ 
+ def start_http_server():
+-    server = BenchmarkHTTPServer(('localhost', 0), BenchmarkHTTPRequestHandler)
++    server = BenchmarkHTTPServer(('127.0.0.1', 0), BenchmarkHTTPRequestHandler)
+     server.running_ladybird_process = None
+     server.last_progress_time = time.monotonic()
+     server.current_test = None
+@@ -144,7 +190,7 @@ def profile_directory_for(browser):
+         snap_common = Path.home() / "snap" / "chromium" / "common"
+         if snap_common.is_dir():
+             return tempfile.TemporaryDirectory(prefix="benchmark-profile-", dir=snap_common)
+-    return tempfile.TemporaryDirectory(prefix="ladybird-benchmark-profile-")
++    return tempfile.TemporaryDirectory(prefix="lb-bench-")
+ 
+ 
+ def run_benchmark(benchmark_path, runner_url, benchmark_params, ladybird_arguments, timeout, verbose=False, browser="ladybird"):
+@@ -155,13 +201,21 @@ def run_benchmark(benchmark_path, runner_url, benchmark_params, ladybird_argumen
+ 
+     query = urlencode(benchmark_params)
+     _, port = server.server_address
+-    url = urlunparse(("http", f"localhost:{port}", runner_url, "", query, ""))
++    url = urlunparse(("http", f"127.0.0.1:{port}", runner_url, "", query, ""))
+ 
+     if browser == "chromium":
+         ladybird_cmd = ladybird_arguments + [f"--user-data-dir={profile.name}", url]
+     else:
++        if os.name == "nt":
++            config = Path(profile.name) / "config"
++            config.mkdir()
++            (config / "Settings.json").write_text(
++                json.dumps({"firstRunComplete": True}), encoding="utf-8")
+         ladybird_cmd = ladybird_arguments + ["--profile-path", profile.name, url]
+ 
++    memory_output = os.environ.get("LADYBIRD_BENCH_MEMORY_JSON")
++    memory_samples = []
++    started = time.monotonic()
+     try:
+         if verbose:
+             process = subprocess.Popen(ladybird_cmd)
+@@ -173,6 +227,11 @@ def run_benchmark(benchmark_path, runner_url, benchmark_params, ladybird_argumen
+         server.running_ladybird_process = process
+ 
+         while True:
++            if memory_output and server.phase != "finished":
++                private = private_memory_bytes(process.pid)
++                if private is not None:
++                    memory_samples.append({"seconds": round(time.monotonic() - started, 3),
++                                           "phase": server.phase, "private_bytes": private})
+             try:
+                 process.wait(timeout=0.5)
+                 if server.phase != "finished":
+@@ -204,6 +263,8 @@ def run_benchmark(benchmark_path, runner_url, benchmark_params, ladybird_argumen
+         process.kill()
+         sys.exit(1)
+     finally:
++        if memory_output:
++            save_memory_samples(Path(memory_output), benchmark_path.name, memory_samples)
+         server.shutdown()
+         server.server_close()
+         server.server_thread.join(timeout=2)
